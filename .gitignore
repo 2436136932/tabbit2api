@@ -11,3 +11,8 @@ venv/
 # 启动器状态文件
 .server.pid
 .server.port
+
+# 临时提交信息文件
+.commitmsg
+commit_msg.txt
+_commit_msg.tmp
