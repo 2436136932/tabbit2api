@@ -3,6 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="data:,">
 <title>Tabbit2API 管理面板</title>
 <style>
 :root{--bg:#0f1420;--card:#171e2e;--card2:#1d2740;--line:#2a3654;--tx:#e8edf7;--tx2:#93a1bd;--acc:#4f8cff;--ok:#3ecf8e;--warn:#f5a524;--bad:#f4536b}
@@ -115,8 +116,9 @@ async function render(){
     </div>
     <div class="tabs" id="tabs">
       <div class="tab" data-t="accounts">账号管理</div>
+      <div class="tab" data-t="usage">调用记录</div>
       <div class="tab" data-t="models">模型与额度</div>
-      <div class="tab" data-t="usage">接入方式</div>
+      <div class="tab" data-t="guide">接入方式</div>
       <div class="tab" data-t="settings">设置</div>
     </div>
     <div id="tabbar"></div>
@@ -125,7 +127,7 @@ async function render(){
   document.querySelectorAll(".tab").forEach(t=>t.onclick=()=>{TAB=t.dataset.t;render();});
   document.querySelectorAll(".tab").forEach(t=>t.classList.toggle("on",t.dataset.t===TAB));
   clearInterval(POLL);clearInterval(LOGIN_TIMER);
-  const draw={accounts:tabAccounts,models:tabModels,usage:tabUsage,settings:tabSettings}[TAB]||tabAccounts;
+  const draw={accounts:tabAccounts,usage:tabUsageLog,models:tabModels,guide:tabGuide,settings:tabSettings}[TAB]||tabAccounts;
   await draw(regions);
 }
 
@@ -311,8 +313,96 @@ async function tabModels(regions){
   await load();
 }
 
+/* ─────────── 调用记录 ─────────── */
+let USAGE_FILTER={region:"",model:"",status:"",days:0};
+async function tabUsageLog(regions){
+  const c=document.getElementById("content");c.innerHTML="";
+  c.appendChild(h(`<div class="card">
+    <div class="acc-head"><h2>调用统计</h2>
+      <div class="row">
+        <select id="uDays"><option value="1">今日</option><option value="7" selected>近 7 天</option><option value="30">近 30 天</option><option value="0">全部</option></select>
+        <button class="mini gh" id="uClear">清空记录</button>
+      </div></div>
+    <div class="grid g2" id="uCards" style="margin-bottom:12px"></div>
+    <div class="grid g2">
+      <div><h3 style="font-size:13px;margin-bottom:8px">按模型</h3><div id="uByModel"></div></div>
+      <div><h3 style="font-size:13px;margin-bottom:8px">按账号 / 按板块</h3><div id="uByAcc"></div></div>
+    </div>
+    <div class="muted" style="margin-top:10px" id="uNote"></div>
+  </div>`));
+  c.appendChild(h(`<div class="card">
+    <div class="acc-head"><h2>调用明细</h2>
+      <div class="row">
+        <select id="fRegion"><option value="">全部板块</option>${regions.map(r=>`<option value="${r.key}">${esc(r.label)}</option>`).join("")}</select>
+        <input id="fModel" placeholder="模型名筛选" style="width:130px">
+        <select id="fStatus"><option value="">全部状态</option><option value="ok">成功</option><option value="error">失败</option></select>
+      </div></div>
+    <div style="overflow-x:auto"><table id="uTable"></table></div>
+    <div class="row" style="margin-top:10px;justify-content:space-between">
+      <span class="muted" id="uTotal"></span>
+      <div class="row"><button class="mini gh" id="uPrev">上一页</button><span class="muted" id="uPage"></span><button class="mini gh" id="uNext">下一页</button></div>
+    </div>
+  </div>`));
+
+  let page=0;
+  const fmtT=ts=>{const d=new Date(ts*1000);return d.toLocaleString("zh-CN",{month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit",second:"2-digit"})};
+  const loadStats=async()=>{
+    const days=+document.getElementById("uDays").value;
+    const s=await api(`/usage/stats?days=${days}`);
+    document.getElementById("uCards").innerHTML=[
+      ["总调用",s.total],["成功",s.ok],["失败",s.error],["成功率",s.success_rate+"%"],
+      ["今日",s.today],["估算总 tokens",s.total_tokens],["折算额度",s.total_credits]
+    ].map(([k,v])=>`<div class="kv"><span>${k}</span><b>${v??0}</b></div>`).join("");
+    document.getElementById("uByModel").innerHTML=(s.by_model||[]).slice(0,12).map(m=>
+      `<div class="kv"><span>${esc(m.model)}${m.errors?` <span style="color:var(--bad)">(${m.errors} 失败)</span>`:""}</span>
+       <span>${m.count} 次 · ${m.tokens} tok</span></div>`).join("")||'<div class="muted">暂无</div>';
+    const reg=s.by_region||{};
+    document.getElementById("uByAcc").innerHTML=(s.by_account||[]).slice(0,10).map(a=>
+      `<div class="kv"><span>${esc(a.account)}</span><span>${a.count} 次 · ${a.tokens} tok</span></div>`).join("")
+      + `<div class="kv" style="margin-top:6px"><span>国内版 / 国际版</span><span>${reg.cn||0} / ${reg.intl||0}</span></div>`;
+    document.getElementById("uNote").textContent=s.note||"";
+  };
+  const loadList=async()=>{
+    const q=new URLSearchParams({limit:50,offset:page*50});
+    USAGE_FILTER.region&&q.set("region",USAGE_FILTER.region);
+    USAGE_FILTER.model&&q.set("model",USAGE_FILTER.model);
+    USAGE_FILTER.status&&q.set("status",USAGE_FILTER.status);
+    const d=await api("/usage?"+q.toString());
+    const t=document.getElementById("uTable");
+    t.innerHTML=`<tr><th>时间</th><th>接口</th><th>板块</th><th>模型</th><th>账号</th><th>tokens</th><th>倍率</th><th>耗时</th><th>额度快照</th><th>状态</th></tr>`
+    +(d.items||[]).map(i=>`<tr>
+      <td class="mono">${fmtT(i.ts)}</td>
+      <td>${i.endpoint==="claude"?"Claude":"OpenAI"}</td>
+      <td>${i.region==="cn"?"国内":"国际"}</td>
+      <td>${esc(i.model||i.model_req)}${i.model_req&&i.model_req!==i.model?`<div class="muted" style="font-size:11px">请求: ${esc(i.model_req)}</div>`:""}</td>
+      <td>${esc(i.account||"—")}${i.member?`<div class="muted" style="font-size:11px">${esc(i.member)}</div>`:""}</td>
+      <td>${i.total_tokens||0}<div class="muted" style="font-size:11px">${i.p_tokens||0}↑ ${i.c_tokens||0}↓</div></td>
+      <td>${i.multiplier||0}</td>
+      <td>${i.ms||0}ms<div class="muted" style="font-size:11px">首字 ${i.ttft_ms||0}ms</div></td>
+      <td>${esc(i.usage_after||"—")}</td>
+      <td>${i.status==="ok"?pill("成功","ok"):pill(i.status==="upstream_error"?"上游错误":"失败","bad")}
+          ${i.error?`<div class="muted" style="font-size:11px" title="${esc(i.error)}">${esc(i.error.slice(0,30))}…</div>`:""}</td>
+    </tr>`).join("")||'<tr><td colspan="10" class="muted">暂无记录</td></tr>';
+    document.getElementById("uTotal").textContent=`共 ${d.total} 条`;
+    document.getElementById("uPage").textContent=`第 ${page+1} 页`;
+    document.getElementById("uPrev").disabled=page===0;
+    document.getElementById("uNext").disabled=(page+1)*50>=d.total;
+  };
+  document.getElementById("uDays").onchange=async()=>{await loadStats();};
+  document.getElementById("fRegion").onchange=e=>{USAGE_FILTER.region=e.target.value;page=0;loadList();};
+  document.getElementById("fModel").oninput=e=>{USAGE_FILTER.model=e.target.value.trim();page=0;loadList();};
+  document.getElementById("fStatus").onchange=e=>{USAGE_FILTER.status=e.target.value;page=0;loadList();};
+  document.getElementById("uPrev").onclick=()=>{if(page>0){page--;loadList();}};
+  document.getElementById("uNext").onclick=()=>{page++;loadList();};
+  document.getElementById("uClear").onclick=async()=>{
+    if(!confirm("确认清空全部调用记录？"))return;
+    const j=await api("/usage",{method:"DELETE"});toast(`已清空 ${j.cleared} 条`);
+    page=0;await loadStats();await loadList();};
+  await loadStats();await loadList();
+}
+
 /* ─────────── 接入方式 ─────────── */
-async function tabUsage(regions){
+async function tabGuide(regions){
   const s=await api("/settings").catch(()=>({}));
   const c=document.getElementById("content");c.innerHTML="";
   const key=s.api_key||"<你的APIKey>";

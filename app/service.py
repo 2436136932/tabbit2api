@@ -2,6 +2,10 @@
 
 同一 (api_key, model, region) 复用上游 chat_session_id，使多轮对话
 拥有连续上下文；每会话加锁避免上游 409 冲突。
+
+每次调用都会写入一条用量记录（UsageLog）：模型、账号、token 估算、
+倍率折算额度、耗时、TTFT、状态。额度百分比来自上游真实接口，
+在调用结束后异步刷新并回填，不阻塞响应。
 """
 from __future__ import annotations
 
@@ -12,16 +16,20 @@ from typing import AsyncGenerator, Optional
 
 from .accounts import AccountPool, Account
 from .tabbit_client import TabbitClient, TabbitError
+from .usage_log import UsageLog, estimate_tokens
 
 logger = logging.getLogger("tabbit2api")
 
 
 class ChatService:
-    def __init__(self, pool: AccountPool, cfg):
+    def __init__(self, pool: AccountPool, cfg, usage: UsageLog | None = None):
         self.pool = pool
         self.cfg = cfg
+        self.usage = usage or UsageLog()
         self._sessions: dict[str, dict] = {}
         self._locks: dict[str, asyncio.Lock] = {}
+        self._tasks: set[asyncio.Task] = set()
+        self._quota_refreshed_at: dict[str, float] = {}
 
     # ── 会话缓存 ─────────────────────────────────────────────────
     def _key(self, bearer: str, model: str, region: str) -> str:
@@ -84,13 +92,15 @@ class ChatService:
             return m["display_name"], m
         return None, None
 
-    def chat(self, bearer: str, model: str, region: str, content: str
-             ) -> AsyncGenerator[dict, None]:
-        return self._chat(bearer, model, region, content)
+    def chat(self, bearer: str, model: str, region: str, content: str,
+             endpoint: str = "openai", stream: bool = True,
+             model_req: str = "") -> AsyncGenerator[dict, None]:
+        return self._chat(bearer, model, region, content, endpoint, stream, model_req)
 
-    async def _chat(self, bearer: str, model: str, region: str, content: str
-                    ) -> AsyncGenerator[dict, None]:
-        display, _mobj = self.resolve_model(region, model)
+    async def _chat(self, bearer: str, model: str, region: str, content: str,
+                    endpoint: str = "openai", stream: bool = True,
+                    model_req: str = "") -> AsyncGenerator[dict, None]:
+        display, mobj = self.resolve_model(region, model)
         if not display:
             if not self.pool.list(region):
                 from .config import REGION_PRESETS
@@ -101,39 +111,127 @@ class ChatService:
             raise TabbitError(
                 f"未知模型：{model}（可调用 GET /v1/models 查看该板块可用模型）", 400)
 
+        started = time.time()
+        first_chunk_at: Optional[float] = None
+        out_chars = 0
+        acc_used: Optional[Account] = None
+        err_text = ""
+        status = "ok"
+
+        def _log(acct: Optional[Account]) -> None:
+            mult = float((mobj or {}).get("display_multiplier") or 0.0)
+            p_tok = estimate_tokens(content)
+            c_tok = estimate_tokens("汉" * out_chars) if out_chars else 0
+            total = p_tok + c_tok
+            self.usage.record(
+                endpoint=endpoint, region=region,
+                account_id=getattr(acct, "id", "") or "",
+                account=getattr(acct, "display_name", "") or "",
+                member=getattr(acct, "member_level", "") or "",
+                model_req=model_req or model, model=display,
+                stream=stream, status=status, error=err_text,
+                p_chars=len(content or ""), c_chars=out_chars,
+                p_tokens=p_tok, c_tokens=c_tok, total_tokens=total,
+                multiplier=mult, credits=round(total * mult, 4),
+                ttft_ms=int((first_chunk_at - started) * 1000) if first_chunk_at else 0,
+                ms=int((time.time() - started) * 1000),
+                api_key=bearer if bearer != "local" else "",
+                # 调用时该账号「已看到的」真实额度（零额外请求）；
+                # 异步刷新成功后会用最新值回填
+                usage_after=getattr(acct, "usage_percentage", "") or "",
+            )
+            if acct is not None:
+                self._spawn_refresh_quota(acct)
+
         skey = self._key(bearer, display, region)
         async with self._lock_for(skey):
             session_id = self._get_session(skey)
             fresh = session_id is None
             attempts = 0
-            while True:
-                attempts += 1
-                acc, client = self.pool.acquire(region)
-                if acc is None:
-                    raise TabbitError(
-                        f"区域「{region}」没有可用账号，请到管理面板用浏览器登录导入", 503)
-                try:
-                    if fresh or session_id is None:
-                        session_id = await client.create_session()
-                        self._set_session(skey, session_id)
-                        fresh = False
-                    got_chunk = False
-                    async for ev in client.stream_chat(session_id, content, display):
-                        if ev["event"] == "message_chunk":
-                            got_chunk = True
-                        yield {"account": acc, "event": ev["event"], "data": ev["data"]}
-                        if ev["event"] in ("finish", "close", "error", "cancel"):
-                            break
-                    self.pool.report_success(acc.id)
-                    return
-                except TabbitError as e:
-                    self.pool.report_error(acc.id, str(e), e.code)
-                    if got_chunk or attempts >= len(self.pool.list(region)) or attempts >= 3:
-                        raise
-                    logger.warning("账号 %s 失败(%s)，切换下一个: %s",
-                                   acc.id, e.code, e)
-                    fresh = True
-                    session_id = None
+            got_chunk = False
+            try:
+                while True:
+                    attempts += 1
+                    acc, client = self.pool.acquire(region)
+                    if acc is None:
+                        raise TabbitError(
+                            f"区域「{region}」没有可用账号，请到管理面板用浏览器登录导入", 503)
+                    acc_used = acc
+                    try:
+                        if fresh or session_id is None:
+                            session_id = await client.create_session()
+                            self._set_session(skey, session_id)
+                            fresh = False
+                        async for ev in client.stream_chat(session_id, content, display):
+                            if ev["event"] == "message_chunk":
+                                got_chunk = True
+                                if first_chunk_at is None:
+                                    first_chunk_at = time.time()
+                                c = (ev["data"] or {}).get("content")
+                                if isinstance(c, str):
+                                    out_chars += len(c)
+                            elif ev["event"] == "error":
+                                status = "upstream_error"
+                                d = ev["data"] or {}
+                                err_text = str(d.get("message") or d)[:300]
+                            yield {"account": acc, "event": ev["event"], "data": ev["data"]}
+                            if ev["event"] in ("finish", "close", "error", "cancel"):
+                                break
+                        self.pool.report_success(acc.id)
+                        return
+                    except TabbitError as e:
+                        self.pool.report_error(acc.id, str(e), e.code)
+                        err_text = str(e)[:300]
+                        if got_chunk or attempts >= len(self.pool.list(region)) or attempts >= 3:
+                            status = "error"
+                            raise
+                        logger.warning("账号 %s 失败(%s)，切换下一个: %s",
+                                       acc.id, e.code, e)
+                        fresh = True
+                        session_id = None
+            except Exception:
+                if status == "ok":
+                    status = "error"
+                raise
+            finally:
+                _log(acc_used)
+
+    # ── 额度刷新（不阻塞响应）─────────────────────────────────────
+    QUOTA_REFRESH_MIN_GAP = 60      # 秒，同一账号两次 quota 查询最小间隔
+
+    def _spawn_refresh_quota(self, acc: Account) -> None:
+        """调用后异步刷新该账号的真实额度百分比（带节流，避免放大上游请求）。"""
+        now = time.time()
+        if now - self._quota_refreshed_at.get(acc.id, 0.0) < self.QUOTA_REFRESH_MIN_GAP:
+            return
+        self._quota_refreshed_at[acc.id] = now
+        try:
+            task = asyncio.create_task(self._refresh_quota(acc))
+        except RuntimeError:
+            return
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
+    async def _refresh_quota(self, acc: Account) -> None:
+        try:
+            client = self.pool.client_for(acc)
+            quota = await client.get_quota()
+            acc.member_level = quota.get("member_level") or acc.member_level
+            acc.usage_percentage = quota.get("usage_percentage") or acc.usage_percentage
+            acc.quota = quota
+            self.pool._persist()
+            pct = quota.get("usage_percentage") or ""
+            if pct:
+                # 只更新内存，落盘由定时 flush 负责，避免阻塞事件循环
+                self.usage.update_latest(acc.id, usage_after=pct,
+                                         persist=False, backfill=5)
+        except Exception as e:
+            logger.debug("额度刷新失败（忽略）: %s", e)
+
+    async def aclose(self) -> None:
+        for t in list(self._tasks):
+            t.cancel()
+        self.usage.save(force=True)
 
 
 def collect_text(events: list[dict]) -> tuple[str, str]:

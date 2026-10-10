@@ -17,6 +17,7 @@ from .auth import make_api_key_auth
 from .config import ConfigManager, ROOT, warn
 from .login import LoginManager
 from .service import ChatService
+from .usage_log import UsageLog
 
 logging.basicConfig(
     level=logging.INFO,
@@ -36,12 +37,13 @@ def create_app(cfg: ConfigManager | None = None) -> FastAPI:
     for line in migrate_config(cfg):
         logger.info("配置迁移 %s", line)
     pool = AccountPool(cfg)
-    service = ChatService(pool, cfg)
+    usage = UsageLog()
+    service = ChatService(pool, cfg, usage)
     logins = LoginManager(pool)
 
     app = FastAPI(title="Tabbit2API", docs_url=None, redoc_url=None)
     state = {"config": cfg, "pool": pool, "service": service,
-             "logins": logins, "auth": make_api_key_auth(cfg)}
+             "logins": logins, "auth": make_api_key_auth(cfg), "usage": usage}
 
     from .routes import admin_api, claude_api, openai_api
     app.include_router(openai_api.setup(state))
@@ -69,11 +71,11 @@ def create_app(cfg: ConfigManager | None = None) -> FastAPI:
 
     @app.on_event("shutdown")
     async def _shutdown():
+        await service.aclose()      # 落盘调用记录
         await pool.close_all()
 
     @app.on_event("startup")
     async def _startup():
-        # 用已有账号的真实模型填充各区域目录，避免目录为空
         from .model_catalog import set_models
         from .tabbit_client import TabbitError
         for region in ("cn", "intl"):
@@ -87,7 +89,15 @@ def create_app(cfg: ConfigManager | None = None) -> FastAPI:
                         pool.refresh_from_upstream(acc.id, {}, {}, models)
                     except TabbitError:
                         pass
-        # 无账号时允许预热模型目录（不写库，仅内存）
+        # 定时把调用记录刷盘（不阻塞请求）
+        async def _flusher():
+            while True:
+                await asyncio.sleep(3)
+                try:
+                    usage.flush()
+                except Exception:
+                    pass
+        asyncio.create_task(_flusher())
 
     return app
 

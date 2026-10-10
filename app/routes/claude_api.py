@@ -58,7 +58,9 @@ def setup(state) -> APIRouter:
 
         events, err = [], None
         try:
-            async for ev in service.chat(bearer, req.model, region, content):
+            async for ev in service.chat(bearer, req.model, region, content,
+                                         endpoint="claude", stream=False,
+                                         model_req=req.model):
                 events.append(ev)
                 if ev["event"] == "error":
                     err = ev["data"]
@@ -100,7 +102,9 @@ def setup(state) -> APIRouter:
                             "model": model, "content": [],
                             "stop_reason": None, "stop_sequence": None,
                             "usage": {"input_tokens": 0, "output_tokens": 0}}})
-            async for item in service.chat(bearer, model, region, content):
+            async for item in service.chat(bearer, model, region, content,
+                                          endpoint="claude", stream=True,
+                                          model_req=model):
                 et, d = item["event"], (item["data"] or {})
                 if et == "thinking":
                     r = d.get("reasoning_content")

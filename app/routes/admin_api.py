@@ -204,6 +204,25 @@ def setup(state) -> APIRouter:
                 last_err = e
         raise HTTPException(502, f"刷新模型失败：{last_err}")
 
+    # ── 调用记录 ─────────────────────────────────────────────────
+    @router.get("/usage")
+    async def usage_list(limit: int = 100, offset: int = 0, region: str = "",
+                         model: str = "", status: str = "", days: int = 0):
+        usage = state["usage"]
+        since = time.time() - days * 86400 if days > 0 else 0.0
+        data = usage.list(limit=min(max(limit, 1), 500), offset=max(offset, 0),
+                          region=region, model=model, status=status, since=since)
+        data["stats"] = usage.stats(days=days if days > 0 else 7)
+        return data
+
+    @router.get("/usage/stats")
+    async def usage_stats(days: int = 7):
+        return state["usage"].stats(days=max(1, min(days, 90)))
+
+    @router.delete("/usage")
+    async def usage_clear():
+        return {"cleared": state["usage"].clear()}
+
     # ── 会话 ─────────────────────────────────────────────────────
     @router.get("/sessions")
     async def sessions():
