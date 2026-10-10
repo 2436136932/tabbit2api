@@ -177,8 +177,13 @@ class ChatService:
                                     out_chars += len(c)
                             elif ev["event"] == "error":
                                 status = "upstream_error"
-                                d = ev["data"] or {}
-                                err_text = str(d.get("message") or d)[:300]
+                                d = dict(ev["data"] or {})
+                                raw_msg = str(d.get("message") or d)
+                                err_text = raw_msg[:300]
+                                # 归一化上游误导性文案（见 _explain_error）
+                                d["message"] = _explain_error(
+                                    raw_msg, d.get("code"), len(content or ""))
+                                ev = {"event": "error", "data": d}
                             yield {"account": acc, "event": ev["event"], "data": ev["data"]}
                             if ev["event"] in ("finish", "close", "error", "cancel"):
                                 break
@@ -237,6 +242,29 @@ class ChatService:
         for t in list(self._tasks):
             t.cancel()
         self.usage.save(force=True)
+
+
+def _explain_error(raw_msg: str, code, req_chars: int = 0) -> str:
+    """把上游误导性错误文案翻译成可操作的真实原因。
+
+    实测：内容超长（≥5 万字符）时上游返回 code=492，文案却是
+    「欢迎使用 Tabbit 浏览器…」，与真实原因完全无关。
+    """
+    msg = (raw_msg or "").strip()
+    low = msg.lower()
+    # 长度超限：文案是营销语，或请求本身已超阈值
+    if "欢迎使用" in msg or "welcome to tabbit" in low:
+        if req_chars >= 18000:
+            return (f"请求内容过长（约 {req_chars} 字符）被上游拒绝。"
+                    f"实测上游单次上限约 2 万字符，请减少上下文或分段发送。"
+                    f"（上游原始提示为营销文案，易误导）")
+        return ("上游拒绝了本次请求（可能是内容过长或权益校验未通过）。"
+                "请减少上下文长度后重试。")
+    if "仅高级用户可用" in msg or "升级" in msg:
+        return f"{msg}（该模型为 Premium，当前账号等级不足）"
+    if "版本过低" in msg:
+        return f"{msg}（需更新客户端版本标识）"
+    return msg
 
 
 def collect_text(events: list[dict]) -> tuple[str, str]:

@@ -186,32 +186,6 @@ def _region(v: str, pool=None) -> str:
 
 
 def _flatten(system, messages: List[ClaudeMessage]) -> str:
-    parts: list[str] = []
-    if system:
-        if isinstance(system, str):
-            parts.append(f"[系统指令]\n{system}")
-        else:
-            buf = []
-            for seg in system:
-                if isinstance(seg, dict) and seg.get("type") == "text":
-                    buf.append(seg.get("text", ""))
-            if buf:
-                parts.append("[系统指令]\n" + "\n".join(buf))
-    for m in messages:
-        c = m.content
-        if isinstance(c, list):
-            buf = []
-            for seg in c:
-                if isinstance(seg, dict):
-                    if seg.get("type") == "text":
-                        buf.append(seg.get("text", ""))
-                    elif seg.get("type") == "image":
-                        buf.append("[图片：当前实现暂不支持图片输入]")
-            c = "\n".join(x for x in buf if x)
-        if not isinstance(c, str):
-            c = "" if c is None else str(c)
-        if m.role == "assistant":
-            parts.append(f"[助手]\n{c}")
-        else:
-            parts.append(c)
-    return "\n\n".join(p for p in parts if p.strip())
+    """Claude system + messages → 单条 prompt（带长度预算，超长裁剪历史）。"""
+    from ..message_builder import build_from_claude
+    return build_from_claude(system, messages)

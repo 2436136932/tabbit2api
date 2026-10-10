@@ -192,33 +192,13 @@ def _sse(cid, created, model, delta, finish=None):
 
 
 def _flatten(messages: List[Message]) -> str:
-    """把 OpenAI 消息列表拼成一段上游可用的纯文本 prompt。"""
-    parts: list[str] = []
-    for m in messages:
-        c = m.content
-        if isinstance(c, list):
-            buf = []
-            for seg in c:
-                if isinstance(seg, dict):
-                    if seg.get("type") == "text":
-                        buf.append(seg.get("text", ""))
-                    elif seg.get("type") == "image_url":
-                        buf.append("[图片：当前实现暂不支持图片输入]")
-                elif isinstance(seg, str):
-                    buf.append(seg)
-            c = "\n".join(x for x in buf if x)
-        if not isinstance(c, str):
-            c = "" if c is None else str(c)
-        role = m.role
-        if role == "system":
-            parts.append(f"[系统指令]\n{c}")
-        elif role == "assistant":
-            parts.append(f"[助手]\n{c}")
-        elif role == "tool":
-            parts.append(f"[工具结果]\n{c}")
-        else:
-            parts.append(c)
-    return "\n\n".join(p for p in parts if p.strip())
+    """把 OpenAI 消息列表拼成一段上游可用的纯文本 prompt（带长度预算）。
+
+    上游对单次内容长度有硬限制（实测 ≥5 万字符返回 492），
+    因此超长历史会被裁剪：保留系统指令 + 最近的对话。
+    """
+    from ..message_builder import build_from_openai
+    return build_from_openai(messages)
 
 
 def _region(header_value: str, pool=None) -> str:

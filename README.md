@@ -99,6 +99,7 @@ claude
 | 板块限定 | 请求头 / 查询参数 | `X-Tabbit-Region: cn` / `intl`，或 `GET /v1/models?region=intl`；不传则返回全部板块 |
 | 默认模型 | 面板「设置」 | 缺省 `默认`（free_unlimited，不耗额度） |
 | 会话缓存 TTL | 面板「设置」 | `0` = 无状态（默认，每次新会话发完整对话）；`>0` 秒 = 复用上游会话 |
+| 上下文预算 | `app/message_builder.py` → `DEFAULT_BUDGET` | 默认 16000 字符；超长历史自动裁剪（保留系统指令 + 最近对话） |
 | 端口 | `config.json` → `server.port` | 起始端口，冲突自动 +1 |
 | 调用记录保留 | `app/usage_log.py` → `MAX_ENTRIES` | 默认 2000 条，超出丢弃最旧 |
 
@@ -122,6 +123,31 @@ curl http://127.0.0.1:8123/v1/models?region=intl   # 只看国际版（33 个）
 ```
 
 中文模型名已英文化：`默认` → `cn/default`；`cn/默认` 与 `cn/default` 等价。
+
+## 长对话与内容长度上限
+
+上游对**单次请求内容**有硬上限，实测：
+
+| 字符数 | 结果 |
+|---|---|
+| 20000 | ✅ 成功 |
+| 25000 | ❌ `492` |
+
+与内容形态无关（自然文本、无空格长串、多轮结构表现一致），且**国内版与国际版一致**。
+
+超限时的错误文案是「欢迎使用 Tabbit 浏览器（…），可免费使用最全最先进的模型。」，
+**与真实原因完全无关**，极易误判为账号或权益问题。
+
+本项目做了两层处理：
+
+1. **自动裁剪**（`app/message_builder.py`）：按 16000 字符预算拼装，
+   保留系统指令 + 从最近往回累积对话；单条超长消息保留首尾并标注「中间已省略」；
+   被丢弃的更早历史会插入 `[注意：更早的对话历史因长度限制已省略]`
+2. **错误归一化**（`service._explain_error`）：把上述营销文案翻译为
+   「请求内容过长（约 N 字符）被上游拒绝，实测上游单次上限约 2 万字符…」
+
+> 因此长时间运行的 Agent（如累计几百步工具调用）不会再因上下文膨胀而失败，
+> 但更早的对话细节会被裁剪 —— 这是上游限制，无法绕过。
 
 ## 调用记录
 
@@ -151,6 +177,7 @@ curl http://127.0.0.1:8123/v1/models?region=intl   # 只看国际版（33 个）
 | `selected_model` | 必须传模型列表里的 `display_name`（如 `GLM-5.3`），传 slug 会被服务端自动切换模型 |
 | 真实额度 | `GET /api/commerce/quota/v1/usage?user_id=<uid>` → `member_level` / `usage_percentage` / 周期 |
 | 无权限模型 | SSE `error` code `492`（v1）/ HTTP `403`（v3），已如实透传给调用方 |
+| 内容长度上限 | **实测约 2 万字符**：20000 成功、25000 必失败（与内容形态无关）。超限同样返回 `492` 且文案是「欢迎使用 Tabbit 浏览器…」，**与真实原因完全无关**。本项目默认按 16000 字符预算裁剪历史，并把该文案归一化为可读提示 |
 
 ## 目录结构
 
@@ -163,7 +190,8 @@ app/
   service.py        会话缓存与对话编排
   usage_log.py      调用记录（环形缓冲 + 落盘）
   login.py          OAuth 浏览器登录导入
-  model_catalog.py  模型别名 → 上游 display_name
+  model_catalog.py  模型别名 → 上游 display_name（含板块前缀解析）
+  message_builder.py 消息拼装与长度预算（上游单次约 2 万字符上限）
   auth.py           对外 API Key 鉴权（面板无密码）
   routes/           openai_api · claude_api · admin_api
   static/index.html 管理面板
