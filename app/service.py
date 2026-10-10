@@ -77,20 +77,21 @@ class ChatService:
         return self._locks[key]
 
     # ── 模型解析 ─────────────────────────────────────────────────
-    def resolve_model(self, region: str, requested: str) -> tuple[Optional[str], Optional[dict]]:
+    def resolve_model(self, region: str, requested: str
+                      ) -> tuple[Optional[str], Optional[dict], str, str]:
         """把请求里的模型名解析为上游 display_name。
 
-        请求可用别名（slug/中文名/display_name），一律映射到上游真实值。
-        返回 (display_name | None, model_obj | None)。
+        支持 `cn/glm-5.3`、`intl/gpt-6-sol` 前缀写法，也兼容裸名。
+        返回 (display_name | None, model_obj | None, region_key, error)。
         """
         requested = (requested or "").strip()
         if not requested:
             requested = self.cfg.get("proxy", "default_model", default="默认") or "默认"
-        from .model_catalog import all_models, find_model
-        m = find_model(region, requested)
+        from .model_catalog import find_model
+        m, rk, err = find_model(region, requested)
         if m:
-            return m["display_name"], m
-        return None, None
+            return m["display_name"], m, (rk or region), ""
+        return None, None, (rk or region), err
 
     def chat(self, bearer: str, model: str, region: str, content: str,
              endpoint: str = "openai", stream: bool = True,
@@ -100,8 +101,11 @@ class ChatService:
     async def _chat(self, bearer: str, model: str, region: str, content: str,
                     endpoint: str = "openai", stream: bool = True,
                     model_req: str = "") -> AsyncGenerator[dict, None]:
-        display, mobj = self.resolve_model(region, model)
+        display, mobj, region, resolve_err = self.resolve_model(region, model)
         if not display:
+            # 前缀已指定板块但该板块无账号/无模型 → 报对应板块的账号问题
+            if resolve_err:
+                raise TabbitError(resolve_err, 400)
             if not self.pool.list(region):
                 from .config import REGION_PRESETS
                 label = REGION_PRESETS.get(region, {}).get("label", region)
@@ -109,7 +113,8 @@ class ChatService:
                     f"「{label}」板块还没有账号，请先到管理面板 "
                     f"http://127.0.0.1:8123/admin 用浏览器登录导入账号", 503)
             raise TabbitError(
-                f"未知模型：{model}（可调用 GET /v1/models 查看该板块可用模型）", 400)
+                f"未知模型：{model}（可调用 GET /v1/models 查看可用模型，"
+                f"支持 cn/、intl/ 前缀）", 400)
 
         started = time.time()
         first_chunk_at: Optional[float] = None

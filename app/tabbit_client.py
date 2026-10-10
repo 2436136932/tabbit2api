@@ -18,6 +18,7 @@ import hashlib
 import hmac
 import json
 import logging
+import random
 import time
 import uuid
 from typing import Any, AsyncGenerator, Optional
@@ -38,6 +39,53 @@ SEC_CH_UA = '"Tabbit Browser";v="149", "Chromium";v="149", "Not)A;Brand";v="24"'
 DEFAULT_REQ_CTX = "MS42LjIwKDEwMTA2MDIwKQ=="
 
 SIGN_KEY_TTL = 1800  # 秒，过期或 499 时刷新
+
+# ── unique-uuid（客户端自证标记）─────────────────────────────────
+# 实测：国际版（web.tabbit.ai）**必须**携带该请求头，否则聊天直接返回
+# 492；国内版不强制。结构为 32 位 hex（UUID 形式）：
+#   - 第 5 位（0-indexed）为「默认浏览器」标记位
+#   - 位置 [2,7,11,14,18,21,25,28] 编码当前时间的 hex（防重放）
+# 我们如实填写标记位：只有真的把 Tabbit 设为默认浏览器时才置 "1"，
+# 不伪造 Pro 权益（标记位=0 已足以正常调用免费模型）。
+_HEX = "0123456789abcdef"
+_TS_POSITIONS = (2, 7, 11, 14, 18, 21, 25, 28)
+_DEFAULT_BROWSER_MARKER = "1"
+
+
+def make_unique_uuid(is_default_browser: bool = False) -> str:
+    """生成带真实默认浏览器标记的 unique-uuid。"""
+    ts = f"{int(time.time()):x}"[-8:].rjust(8, "0")
+    ts_map = {pos: ts[i] for i, pos in enumerate(_TS_POSITIONS)}
+    others = _HEX.replace(_DEFAULT_BROWSER_MARKER, "")
+    out: list[str] = []
+    for i in range(32):
+        if i == 5:
+            out.append(_DEFAULT_BROWSER_MARKER if is_default_browser
+                       else random.choice(others))
+        elif i in ts_map:
+            out.append(ts_map[i])
+        else:
+            out.append(random.choice(_HEX))
+    s = "".join(out)
+    return f"{s[:8]}-{s[8:12]}-{s[12:16]}-{s[16:20]}-{s[20:]}"
+
+
+def detect_default_browser() -> bool:
+    """检测 Tabbit 是否为系统默认浏览器（Windows 注册表 UserChoice）。"""
+    try:
+        import winreg  # type: ignore
+    except ImportError:
+        return False
+    try:
+        with winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\Shell\Associations"
+            r"\UrlAssociations\https\UserChoice",
+        ) as k:
+            progid = str(winreg.QueryValueEx(k, "ProgId")[0]).lower()
+        return "tabbit" in progid
+    except Exception:
+        return False
 
 # 上游 SSE 事件 → 统一事件名
 KNOWN_EVENTS = {
@@ -64,13 +112,18 @@ class TabbitClient:
 
     def __init__(self, base_url: str, token: str, user_id: str = "",
                  device_id: str | None = None, client_id: str = "2dd8eb4c1ed9c344d173",
-                 req_ctx: str = DEFAULT_REQ_CTX):
+                 req_ctx: str = DEFAULT_REQ_CTX,
+                 is_default_browser: bool | None = None):
         self.base_url = base_url.rstrip("/")
         self.token = token
         self.user_id = user_id or self._extract_user_id(token)
         self.device_id = device_id or str(uuid.uuid4())
         self.client_id = client_id
         self.req_ctx = req_ctx
+        # 默认浏览器标记：未显式指定则实测本机（不伪造）
+        self.is_default_browser = (detect_default_browser()
+                                   if is_default_browser is None
+                                   else bool(is_default_browser))
         self._sign_key: str = FALLBACK_SIGN_KEY
         self._sign_key_at: float = 0.0
         self._lock = asyncio.Lock()
@@ -211,6 +264,8 @@ class TabbitClient:
             "Cache-Control": "no-cache",
             "trace-id": trace_id,
             "x-req-ctx": self.req_ctx,
+            # 国际版必需：缺失会被判无权益并返回 492
+            "unique-uuid": make_unique_uuid(self.is_default_browser),
             **self._signature(body),
         }
 

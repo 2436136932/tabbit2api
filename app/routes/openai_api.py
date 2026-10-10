@@ -39,10 +39,30 @@ def setup(state) -> APIRouter:
 
     @router.get("/v1/models")
     async def list_models(authorization: str = Header(default=""),
-                          x_tabbit_region: str = Header(default="")):
+                          x_tabbit_region: str = Header(default=""),
+                          region: str = ""):
+        """列出模型。
+
+        默认返回**所有已配置板块**的模型，ID 带板块前缀（cn/、intl/）
+        以区分同名模型；可用 ?region=cn 只看某板块。
+        请求头 X-Tabbit-Region 仍可用于限定默认板块。
+        """
         auth(authorization)
-        region = _region(x_tabbit_region, state.get("pool"))
-        return {"object": "list", "data": to_openai_models(region)}
+        pool = state.get("pool")
+        want = (region or "").strip().lower()
+        if want in ("cn", "intl"):
+            targets = [want]
+        elif (x_tabbit_region or "").strip().lower() in ("cn", "intl"):
+            targets = [(x_tabbit_region or "").strip().lower()]
+        else:
+            # 有账号的板块优先，同时包含已拉到目录的板块
+            from ..model_catalog import regions_with_models
+            have = regions_with_models()
+            with_acc = [r for r in ("cn", "intl")
+                        if pool is not None and pool.list(r)]
+            targets = [r for r in ("cn", "intl")
+                       if r in have or r in with_acc] or list(("cn", "intl"))
+        return {"object": "list", "data": to_openai_models(targets)}
 
     @router.post("/v1/chat/completions")
     async def chat_completions(req: ChatRequest,

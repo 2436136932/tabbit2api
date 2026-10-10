@@ -16,10 +16,11 @@
   - **加固模式**：Playwright 驱动，去掉 `--enable-automation` 并注入脚本抹除 webdriver 指纹
 - **浏览器回退链** — 自动探测本机已安装的 Tabbit Browser / Chrome / Edge / Brave / Vivaldi 等，面板可选
 - **双协议** — `POST /v1/chat/completions`（OpenAI）+ `POST /v1/messages`（Claude），均支持流式
-- **国内版 / 国际版** — 两个独立板块，各自域名、账号、模型目录；请求头 `X-Tabbit-Region: cn|intl` 切换
+- **国内版 / 国际版** — 两个独立板块，各自域名、账号、模型目录；模型 ID 带板块前缀区分
   - **国内版** = `web.tabbit.com`（前端 `tabbitCn`；遗留域名 `web.tabbit-ai.com` 同属国内版）
   - **国际版** = `web.tabbit.ai`（前端 `overseas`；国内网络直连返回 403 地区限制）
   - 账号按**登录域名自动归入对应板块**，不会错位
+  - 模型 ID 形如 `cn/glm-5.3`、`intl/gpt-6-luna`（两板块有 14 个同名模型，必须前缀区分）
 - **多账号池** — 轮询负载均衡，连续错误自动冷却，401/403 标记登录失效并切换下一账号
 - **调用记录** — 记录每次调用的模型/账号/token/耗时/首字延迟/状态；统计按模型、按账号、
   按天分布；token 为本地估算，额度百分比来自上游真实接口
@@ -94,11 +95,33 @@ claude
 | 配置项 | 位置 | 说明 |
 |---|---|---|
 | API Key | 面板「设置」 | 留空则不鉴权；面板本身无密码 |
-| 板块切换 | 请求头 | `X-Tabbit-Region: cn` / `intl`；**不传时自动使用有账号的板块** |
+| 模型选择 | 请求 body 的 `model` | 用 `板块/模型` 前缀，如 `cn/glm-5.3`、`intl/gpt-6-luna` |
+| 板块限定 | 请求头 / 查询参数 | `X-Tabbit-Region: cn` / `intl`，或 `GET /v1/models?region=intl`；不传则返回全部板块 |
 | 默认模型 | 面板「设置」 | 缺省 `默认`（free_unlimited，不耗额度） |
 | 会话缓存 TTL | 面板「设置」 | `0` = 无状态（默认，每次新会话发完整对话）；`>0` 秒 = 复用上游会话 |
 | 端口 | `config.json` → `server.port` | 起始端口，冲突自动 +1 |
 | 调用记录保留 | `app/usage_log.py` → `MAX_ENTRIES` | 默认 2000 条，超出丢弃最旧 |
+
+### 模型 ID 与板块前缀
+
+`GET /v1/models` 默认返回**所有已配置板块**的模型，共 56 个（国内 23 + 国际 33）：
+
+```bash
+curl http://127.0.0.1:8123/v1/models?region=intl   # 只看国际版（33 个）
+```
+
+两板块有 14 个同名模型（GLM-5.3、Kimi-K3、DeepSeek-V4-Flash…），因此调用时用前缀：
+
+```bash
+# 国内版
+-d '{"model":"cn/glm-5.3", ...}'
+# 国际版（GPT-6 / Claude-Opus-5.5 / Gemini 等仅国际版有）
+-d '{"model":"intl/gpt-6-luna", ...}'
+# 裸名仍兼容：落到有账号的板块
+-d '{"model":"glm-5.3", ...}'
+```
+
+中文模型名已英文化：`默认` → `cn/default`；`cn/默认` 与 `cn/default` 等价。
 
 ## 调用记录
 
@@ -122,6 +145,7 @@ claude
 | 签名 key | `GET /chat/sign-key` 动态获取（各域名不同，实测 web.tabbit.ai 返回 `f8d0e6a7…`，web.tabbit.com 返回 `3a9b1c8d…`） |
 | 签名 | `x-nonce = HMAC-SHA256(key, "{ts}.{uuid}.{sha256hex(body)}")`，`x-signature = uuid`，`x-timestamp = ms` |
 | 版本头 | `x-req-ctx = base64("{version}({build})")`，**缺失或格式不符会返回 493「浏览器版本过低」** |
+| 自证头 | `unique-uuid`：**国际版必需**，缺失则聊天直接返回 492（文案是营销语，实为权益校验）。结构为 32 位 hex，第 5 位是「默认浏览器」标记位，位置 `[2,7,11,14,18,21,25,28]` 编码时间 hex。本项目**如实填写标记位**，不伪造 Pro 权益 |
 | 创建会话 | `POST /panel/session`（空 body）→ `chat_session_id` |
 | 对话 | `POST /api/v1/chat/completion`（SSE），v1 即可覆盖免费与付费模型 |
 | `selected_model` | 必须传模型列表里的 `display_name`（如 `GLM-5.3`），传 slug 会被服务端自动切换模型 |

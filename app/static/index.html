@@ -283,6 +283,10 @@ async function tabModels(regions){
     <div class="row"><select id="mreg">${regions.map(r=>`<option value="${r.key}" ${r.key===REGION?"selected":""}>${esc(r.label)}</option>`).join("")}</select>
     <button class="mini pri" id="rm">刷新模型</button></div></div>
     <div class="muted" style="margin:8px 0 12px" id="mupd"></div>
+    <div class="hint">两个板块有 14 个同名模型（GLM-5.3、Kimi-K3 等），因此调用时用
+    <code class="mono">板块/模型</code> 前缀区分：<code class="mono">cn/glm-5.3</code>、
+    <code class="mono">intl/gpt-6-luna</code>。裸名（<code class="mono">glm-5.3</code>）会落到有账号的板块。
+    把鼠标移到模型标签上可看到该模型的调用 ID。</div>
     <div id="mlist"></div></div>`));
   const load=async()=>{
     const rg=document.getElementById("mreg").value;
@@ -295,7 +299,9 @@ async function tabModels(regions){
       <div>${(a.models||[]).map(m=>{
         const t=m.model_access_type, cls=t==="free_unlimited"?"ok":t==="premium_only"?"bad":"mut";
         const tag=t==="free_unlimited"?"不限量":t==="premium_only"?"Premium":"×"+m.display_multiplier;
-        return `<span class="model-chip" title="${esc(m.description||"")}">${esc(m.display_name)}
+        const slug=(m.display_name||"").trim().toLowerCase().replace(/[^a-z0-9\-.]+/g,"-").replace(/^-+|-+$/g,"")||m.display_name;
+        const callId=rg+"/"+slug;
+        return `<span class="model-chip" title="${esc(m.description||"")}&#10;调用时填: ${esc(callId)}">${esc(m.display_name)}
           <span class="pill p-${cls}" style="margin-left:4px;padding:0 6px">${tag}</span></span>`;}).join("")||'<span class="muted">点「刷新模型」拉取</span>'}</div></div>`).join("");
     // 走面板专用接口（不需要代理 API Key，避免 401 导致面板崩溃）
     let n=0, upd=null;
