@@ -15,6 +15,7 @@ import time
 from typing import AsyncGenerator, Optional
 
 from .accounts import AccountPool, Account
+from .incremental import IncrementalTracker, fingerprints
 from .tabbit_client import TabbitClient, TabbitError
 from .usage_log import UsageLog, estimate_tokens
 
@@ -30,22 +31,36 @@ class ChatService:
         self._locks: dict[str, asyncio.Lock] = {}
         self._tasks: set[asyncio.Task] = set()
         self._quota_refreshed_at: dict[str, float] = {}
+        # 上游会话状态：记录该会话已发送过的消息指纹，用于增量发送
+        self._session_state: dict[str, dict] = {}
+        self._tracker = IncrementalTracker()
 
     # ── 会话缓存 ─────────────────────────────────────────────────
     def _key(self, bearer: str, model: str, region: str) -> str:
         return f"{bearer}:{model}:{region}"
 
+    def _session_ttl(self) -> int:
+        """会话缓存有效期（秒）。
+
+        增量发送依赖会话复用，因此增量开启时至少保留 1 小时，
+        避免用户把 TTL 设为 0 导致增量失效（每次新建会话会丢上下文）。
+        """
+        ttl = int(self.cfg.get("proxy", "session_ttl", default=0))
+        if self._incremental_enabled():
+            return max(ttl, 3600)
+        return ttl
+
     def _get_session(self, key: str) -> Optional[str]:
-        ttl = int(self.cfg.get("proxy", "session_ttl", default=604800))
+        ttl = self._session_ttl()
         e = self._sessions.get(key)
-        if e and time.time() - e["created_at"] < ttl:
+        if e and ttl > 0 and time.time() - e["created_at"] < ttl:
             e["last_used"] = time.time()
             e["count"] += 1
             return e["session_id"]
         return None
 
     def _set_session(self, key: str, session_id: str) -> None:
-        ttl = int(self.cfg.get("proxy", "session_ttl", default=0))
+        ttl = self._session_ttl()
         if ttl <= 0:          # 无状态模式：不缓存会话
             return
         self._sessions[key] = {"session_id": session_id, "created_at": time.time(),
@@ -55,7 +70,7 @@ class ChatService:
         return self._sessions.pop(key, None) is not None
 
     def list_sessions(self) -> list[dict]:
-        ttl = int(self.cfg.get("proxy", "session_ttl", default=604800))
+        ttl = self._session_ttl()
         now = time.time()
         out = []
         for k, e in self._sessions.items():
@@ -76,6 +91,44 @@ class ChatService:
             self._locks[key] = asyncio.Lock()
         return self._locks[key]
 
+    # ── 会话忙碌控制（上游同一会话不接受紧邻请求，实测 409）────────
+    SESSION_IDLE_GAP = 1.5      # 秒，两次请求之间的最小间隔
+    BUSY_RETRY = 3              # 409 时最多重试次数
+    BUSY_WAIT = 2.0             # 每次重试等待秒数
+
+    def _mark_session_busy(self, key: str) -> None:
+        st = self._session_state.setdefault(key, {})
+        st["busy_until"] = time.time() + self.SESSION_IDLE_GAP
+
+    async def _wait_session_idle(self, key: str) -> None:
+        st = self._session_state.get(key) or {}
+        wait = float(st.get("busy_until", 0)) - time.time()
+        if wait > 0:
+            await asyncio.sleep(min(wait, 10))
+
+    @staticmethod
+    def _is_busy_error(msg: str) -> bool:
+        """识别上游「会话处理中」类错误（应重试而非报错）。"""
+        m = msg or ""
+        return ("正在处理" in m or "处理中" in m
+                or "409" in m or "conflict" in m.lower()
+                or "please try again" in m.lower())
+
+    # ── 增量发送状态 ─────────────────────────────────────────────
+    def _incremental_enabled(self) -> bool:
+        """增量发送是否可用（默认开启；需要会话复用支撑）。"""
+        return bool(self.cfg.get("proxy", "incremental", default=True))
+
+    def session_stats(self) -> list[dict]:
+        return self._tracker.stats()
+
+    def reset_incremental(self, key: str | None = None) -> int:
+        """清除增量状态（强制下次发送完整内容）。"""
+        if key:
+            self._tracker.forget(key)
+            return 1
+        return self._tracker.clear()
+
     # ── 模型解析 ─────────────────────────────────────────────────
     def resolve_model(self, region: str, requested: str
                       ) -> tuple[Optional[str], Optional[dict], str, str]:
@@ -95,12 +148,16 @@ class ChatService:
 
     def chat(self, bearer: str, model: str, region: str, content: str,
              endpoint: str = "openai", stream: bool = True,
-             model_req: str = "") -> AsyncGenerator[dict, None]:
-        return self._chat(bearer, model, region, content, endpoint, stream, model_req)
+             model_req: str = "", items: Optional[list] = None
+             ) -> AsyncGenerator[dict, None]:
+        """items 为 [(role, text)] 结构化消息；提供时启用增量发送。"""
+        return self._chat(bearer, model, region, content, endpoint, stream,
+                          model_req, items)
 
     async def _chat(self, bearer: str, model: str, region: str, content: str,
                     endpoint: str = "openai", stream: bool = True,
-                    model_req: str = "") -> AsyncGenerator[dict, None]:
+                    model_req: str = "", items: Optional[list] = None
+                    ) -> AsyncGenerator[dict, None]:
         display, mobj, region, resolve_err = self.resolve_model(region, model)
         if not display:
             # 前缀已指定板块但该板块无账号/无模型 → 报对应板块的账号问题
@@ -154,6 +211,29 @@ class ChatService:
             fresh = session_id is None
             attempts = 0
             got_chunk = False
+
+            # ── 增量发送决策 ──────────────────────────────────────
+            # 客户端每轮重发完整历史，长任务会累积到上百万字符。
+            # 上游会话本身保留上下文，因此只发新增消息即可。
+            # 注意：增量必须依赖会话复用，故此时强制启用会话缓存。
+            send_content = content
+            mode = "full"
+            if items and session_id and self._incremental_enabled():
+                new_items, mode = self._tracker.plan(skey, items)
+                if mode == "incremental":
+                    from .message_builder import build
+                    send_content = build(new_items) or content
+                    logger.info("增量发送：新增 %d 条 / %d 字符（完整 %d 字符）",
+                                len(new_items), len(send_content), len(content))
+                elif mode == "resend_last":
+                    from .message_builder import build
+                    send_content = build(new_items) or content
+                else:
+                    send_content = content
+
+            # 会话忙碌冷却：上游同一会话不接受并发/紧邻请求（实测 409）
+            await self._wait_session_idle(skey)
+
             try:
                 while True:
                     attempts += 1
@@ -162,43 +242,85 @@ class ChatService:
                         raise TabbitError(
                             f"区域「{region}」没有可用账号，请到管理面板用浏览器登录导入", 503)
                     acc_used = acc
-                    try:
-                        if fresh or session_id is None:
-                            session_id = await client.create_session()
-                            self._set_session(skey, session_id)
-                            fresh = False
-                        async for ev in client.stream_chat(session_id, content, display):
-                            if ev["event"] == "message_chunk":
-                                got_chunk = True
-                                if first_chunk_at is None:
-                                    first_chunk_at = time.time()
-                                c = (ev["data"] or {}).get("content")
-                                if isinstance(c, str):
-                                    out_chars += len(c)
-                            elif ev["event"] == "error":
-                                status = "upstream_error"
-                                d = dict(ev["data"] or {})
-                                raw_msg = str(d.get("message") or d)
-                                err_text = raw_msg[:300]
-                                # 归一化上游误导性文案（见 _explain_error）
-                                d["message"] = _explain_error(
-                                    raw_msg, d.get("code"), len(content or ""))
-                                ev = {"event": "error", "data": d}
-                            yield {"account": acc, "event": ev["event"], "data": ev["data"]}
-                            if ev["event"] in ("finish", "close", "error", "cancel"):
-                                break
-                        self.pool.report_success(acc.id)
-                        return
-                    except TabbitError as e:
-                        self.pool.report_error(acc.id, str(e), e.code)
-                        err_text = str(e)[:300]
-                        if got_chunk or attempts >= len(self.pool.list(region)) or attempts >= 3:
-                            status = "error"
-                            raise
-                        logger.warning("账号 %s 失败(%s)，切换下一个: %s",
-                                       acc.id, e.code, e)
-                        fresh = True
-                        session_id = None
+                    busy_retry = 0
+                    while True:
+                        try:
+                            if fresh or session_id is None:
+                                session_id = await client.create_session()
+                                self._set_session(skey, session_id)
+                                fresh = False
+                                # 新会话必须发完整内容（上游没有历史）
+                                send_content = content
+                                if items:
+                                    self._tracker.remember(skey, fingerprints(items))
+                            chunk_before = got_chunk
+                            stream_err = ""
+                            async for ev in client.stream_chat(session_id, send_content, display):
+                                if ev["event"] == "message_chunk":
+                                    got_chunk = True
+                                    if first_chunk_at is None:
+                                        first_chunk_at = time.time()
+                                    c = (ev["data"] or {}).get("content")
+                                    if isinstance(c, str):
+                                        out_chars += len(c)
+                                elif ev["event"] == "error":
+                                    d0 = ev["data"] or {}
+                                    stream_err = str(d0.get("message") or d0)
+
+                                    # 会话忙碌（409）：未产出内容则等待重试
+                                    if (self._is_busy_error(stream_err)
+                                            and not chunk_before
+                                            and busy_retry < self.BUSY_RETRY):
+                                        busy_retry += 1
+                                        logger.info(
+                                            "会话忙碌，%.1fs 后重试（第 %d 次）",
+                                            self.BUSY_WAIT, busy_retry)
+                                        break
+                                    status = "upstream_error"
+                                    d = dict(d0)
+                                    err_text = stream_err[:300]
+                                    d["message"] = _explain_error(
+                                        stream_err, d.get("code"),
+                                        len(send_content or ""))
+                                    ev = {"event": "error", "data": d}
+                                yield {"account": acc, "event": ev["event"],
+                                       "data": ev["data"]}
+                                if ev["event"] in ("finish", "close", "error", "cancel"):
+                                    break
+
+                            # 因忙碌而中断 → 等待后重试同一会话
+                            if (stream_err and self._is_busy_error(stream_err)
+                                    and not chunk_before
+                                    and busy_retry <= self.BUSY_RETRY
+                                    and busy_retry > 0):
+                                await asyncio.sleep(self.BUSY_WAIT)
+                                self._mark_session_busy(skey)
+                                continue
+
+                            self.pool.report_success(acc.id)
+                            self._mark_session_busy(skey)
+                            return
+                        except TabbitError as e:
+                            msg = str(e)
+                            # 会话忙碌：等待重试，不算账号故障
+                            if (self._is_busy_error(msg)
+                                    and busy_retry < self.BUSY_RETRY):
+                                busy_retry += 1
+                                logger.info("会话忙碌(%s)，%.1fs 后重试（第 %d 次）",
+                                            e.code, self.BUSY_WAIT, busy_retry)
+                                await asyncio.sleep(self.BUSY_WAIT)
+                                continue
+                            self.pool.report_error(acc.id, msg, e.code)
+                            err_text = msg[:300]
+                            if (got_chunk or attempts >= len(self.pool.list(region))
+                                    or attempts >= 3):
+                                status = "error"
+                                raise
+                            logger.warning("账号 %s 失败(%s)，切换下一个: %s",
+                                           acc.id, e.code, e)
+                            fresh = True
+                            session_id = None
+                            break
             except Exception:
                 if status == "ok":
                     status = "error"

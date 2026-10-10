@@ -219,6 +219,19 @@ def setup(state) -> APIRouter:
     async def usage_stats(days: int = 7):
         return state["usage"].stats(days=max(1, min(days, 90)))
 
+    # ── 增量发送状态（诊断用）────────────────────────────────────
+    @router.get("/incremental")
+    async def incremental_status():
+        svc = state["service"]
+        return {"enabled": svc._incremental_enabled(),
+                "session_ttl": svc._session_ttl(),
+                "tracked": svc.session_stats()}
+
+    @router.delete("/incremental")
+    async def incremental_reset():
+        """清空增量状态，强制下次发送完整内容。"""
+        return {"cleared": state["service"].reset_incremental()}
+
     @router.delete("/usage")
     async def usage_clear():
         return {"cleared": state["usage"].clear()}

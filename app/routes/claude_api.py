@@ -52,7 +52,8 @@ def setup(state) -> APIRouter:
 
         if req.stream:
             return StreamingResponse(
-                _stream(service, bearer, req.model, region, content),
+                _stream(service, bearer, req.model, region, content,
+                        _items(req.system, req.messages)),
                 media_type="text/event-stream",
                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
@@ -60,7 +61,8 @@ def setup(state) -> APIRouter:
         try:
             async for ev in service.chat(bearer, req.model, region, content,
                                          endpoint="claude", stream=False,
-                                         model_req=req.model):
+                                         model_req=req.model,
+                                         items=_items(req.system, req.messages)):
                 events.append(ev)
                 if ev["event"] == "error":
                     err = ev["data"]
@@ -85,7 +87,7 @@ def setup(state) -> APIRouter:
             "usage": {"input_tokens": 0, "output_tokens": _est(text)},
         }
 
-    async def _stream(service, bearer, model, region, content):
+    async def _stream(service, bearer, model, region, content, items=None):
         mid = f"msg_{uuid.uuid4().hex[:24]}"
         started = time.time()
         block_idx = 0
@@ -104,7 +106,7 @@ def setup(state) -> APIRouter:
                             "usage": {"input_tokens": 0, "output_tokens": 0}}})
             async for item in service.chat(bearer, model, region, content,
                                           endpoint="claude", stream=True,
-                                          model_req=model):
+                                          model_req=model, items=items):
                 et, d = item["event"], (item["data"] or {})
                 if et == "thinking":
                     r = d.get("reasoning_content")
@@ -189,3 +191,9 @@ def _flatten(system, messages: List[ClaudeMessage]) -> str:
     """Claude system + messages → 单条 prompt（带长度预算，超长裁剪历史）。"""
     from ..message_builder import build_from_claude
     return build_from_claude(system, messages)
+
+
+def _items(system, messages: List[ClaudeMessage]) -> list:
+    """提取结构化消息 [(role, text)]，供增量发送判断。"""
+    from ..message_builder import extract_claude
+    return extract_claude(system, messages)

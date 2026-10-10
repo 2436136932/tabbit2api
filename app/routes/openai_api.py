@@ -76,7 +76,8 @@ def setup(state) -> APIRouter:
 
         if req.stream:
             return StreamingResponse(
-                _stream_sse(service, bearer, req.model, region, content),
+                _stream_sse(service, bearer, req.model, region, content,
+                            _items(req.messages)),
                 media_type="text/event-stream",
                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
@@ -84,7 +85,8 @@ def setup(state) -> APIRouter:
         try:
             async for ev in service.chat(bearer, req.model, region, content,
                                          endpoint="openai", stream=False,
-                                         model_req=req.model):
+                                         model_req=req.model,
+                                         items=_items(req.messages)):
                 events.append(ev)
                 if ev["event"] == "error":
                     err = ev["data"]
@@ -113,7 +115,7 @@ def setup(state) -> APIRouter:
             "usage": usage,
         }
 
-    async def _stream_sse(service, bearer, model, region, content):
+    async def _stream_sse(service, bearer, model, region, content, items=None):
         cid = f"chatcmpl-{uuid.uuid4().hex[:24]}"
         created = int(time.time())
         started = time.time()
@@ -121,7 +123,7 @@ def setup(state) -> APIRouter:
         try:
             async for ev in service.chat(bearer, model, region, content,
                                          endpoint="openai", stream=True,
-                                         model_req=model):
+                                         model_req=model, items=items):
                 et, d = ev["event"], (ev["data"] or {})
                 if et == "thinking":
                     r = d.get("reasoning_content")
@@ -194,11 +196,17 @@ def _sse(cid, created, model, delta, finish=None):
 def _flatten(messages: List[Message]) -> str:
     """把 OpenAI 消息列表拼成一段上游可用的纯文本 prompt（带长度预算）。
 
-    上游对单次内容长度有硬限制（实测 ≥5 万字符返回 492），
+    上游对单次内容长度有硬限制（实测 ≥2 万字符返回 492），
     因此超长历史会被裁剪：保留系统指令 + 最近的对话。
     """
     from ..message_builder import build_from_openai
     return build_from_openai(messages)
+
+
+def _items(messages: List[Message]) -> list:
+    """提取结构化消息 [(role, text)]，供增量发送判断。"""
+    from ..message_builder import extract_openai
+    return extract_openai(messages)
 
 
 def _region(header_value: str, pool=None) -> str:

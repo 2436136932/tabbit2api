@@ -174,9 +174,16 @@ async function tabAccounts(regions){
     <div class="muted" style="margin-top:10px" id="accEmpty"></div></div>`));
   c.appendChild(h(`<div class="card"><h2>全部账号一览</h2>
     <div id="allAcc" class="muted"></div></div>`));
-  c.appendChild(h(`<div class="card"><h2>活跃会话缓存</h2>
+  c.appendChild(h(`<div class="card"><h2>活跃会话缓存 · 增量发送</h2>
+    <div class="hint">客户端每轮会重发完整历史，长任务可累积到上百万字符，远超上游单次约
+    2 万字符的上限。开启增量后只把<b>新增消息</b>发给上游，历史由上游会话记忆维持，
+    因此长任务不再失败。若发现上下文异常，可清空会话缓存强制重来。</div>
+    <div class="muted" id="incStatus" style="margin-bottom:10px"></div>
     <div style="overflow-x:auto"><table id="sessTable"></table></div>
-    <div class="row" style="margin-top:10px"><button class="mini gh" id="clearSess">清空会话缓存</button></div></div>`));
+    <div class="row" style="margin-top:10px">
+      <button class="mini gh" id="clearSess">清空会话缓存</button>
+      <button class="mini gh" id="resetInc">重置增量状态</button>
+    </div></div>`));
 
   document.querySelectorAll("#regSwitch button").forEach(b=>b.onclick=()=>{REGION=b.dataset.r;render();});
   const loadBrowsers=async()=>{
@@ -203,7 +210,8 @@ async function tabAccounts(regions){
       pollLogin();}catch(e){toast(e.message);}
   };
   document.getElementById("cancelLogin").onclick=async()=>{try{await api("/login/cancel",{method:"POST"});toast("已取消");}catch(e){}};
-  document.getElementById("clearSess").onclick=async()=>{await api("/sessions",{method:"DELETE"});render();toast("已清空");};
+  document.getElementById("clearSess").onclick=async()=>{await api("/sessions",{method:"DELETE"});await api("/incremental",{method:"DELETE"});render();toast("已清空");};
+  document.getElementById("resetInc").onclick=async()=>{const j=await api("/incremental",{method:"DELETE"});toast(`已重置 ${j.cleared} 个会话的增量状态`);render();};
 
   await Promise.all([loadAccounts(),loadSessions()]);
   pollLogin();
@@ -258,6 +266,18 @@ async function loadSessions(){
   t.innerHTML=`<tr><th>API Key</th><th>模型</th><th>板块</th><th>会话 ID</th><th>请求数</th><th>剩余</th></tr>`
    +(s.slice(0,25).map(x=>{const[k,m,r]=x.key.split(":");
      return `<tr><td class="mono">${esc((k||"").slice(0,12))}${(k||"").length>12?"…":""}</td><td>${esc(m)}</td><td>${pill(r==="cn"?"国内":"国际","mut")}</td><td class="mono">${esc(x.session_id.slice(0,18))}…</td><td>${x.count}</td><td>${Math.floor(x.ttl_remaining/3600)}h</td></tr>`;}).join("")||"");
+  // 增量发送状态
+  const box=document.getElementById("incStatus");
+  if(box){
+    try{
+      const inc=await api("/incremental");
+      const tr=inc.tracked||[];
+      box.innerHTML=inc.enabled
+        ? `${pill("增量发送已开启","ok")} 会话有效期 ${Math.round(inc.session_ttl/60)} 分钟 ·
+           已跟踪 ${tr.length} 个会话${tr.length?" · 已发送消息数 "+tr.map(x=>x.messages).join("/"):""}`
+        : pill("增量发送已关闭","warn");
+    }catch(e){box.textContent="";}
+  }
 }
 function pollLogin(){
   clearInterval(LOGIN_TIMER);

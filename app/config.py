@@ -64,7 +64,8 @@ FALLBACK_SIGN_KEY = "f8d0e6a73f8d4b1a9c3d2e1f9a4b7c6d"
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "server": {"port": 8123, "host": "0.0.0.0"},
-    "proxy": {"api_key": "", "default_model": "默认", "session_ttl": 0},
+    "proxy": {"api_key": "", "default_model": "默认", "session_ttl": 0,
+              "incremental": True},
     # 面板无密码登录；jwt_secret 仅用作账号 token 的加密密钥（勿删，否则已存账号无法解密）
     "admin": {"jwt_secret": ""},
     "regions": {

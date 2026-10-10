@@ -106,8 +106,8 @@ def build(items: list[tuple[str, str]], budget: int = DEFAULT_BUDGET) -> str:
     return out
 
 
-def build_from_openai(messages, budget: int = DEFAULT_BUDGET) -> str:
-    """OpenAI 风格 messages → 单条 prompt。"""
+def extract_openai(messages) -> list[tuple[str, str]]:
+    """OpenAI messages → [(role, text)]（供增量发送判断用）。"""
     items: list[tuple[str, str]] = []
     for m in messages:
         c = getattr(m, "content", None)
@@ -126,11 +126,11 @@ def build_from_openai(messages, budget: int = DEFAULT_BUDGET) -> str:
         if not isinstance(c, str):
             c = "" if c is None else str(c)
         items.append((role, c))
-    return build(items, budget)
+    return items
 
 
-def build_from_claude(system, messages, budget: int = DEFAULT_BUDGET) -> str:
-    """Claude 风格 system + messages → 单条 prompt。"""
+def extract_claude(system, messages) -> list[tuple[str, str]]:
+    """Claude system + messages → [(role, text)]。"""
     items: list[tuple[str, str]] = []
     if system:
         if isinstance(system, str):
@@ -159,4 +159,14 @@ def build_from_claude(system, messages, budget: int = DEFAULT_BUDGET) -> str:
         if not isinstance(c, str):
             c = "" if c is None else str(c)
         items.append((role, c))
-    return build(items, budget)
+    return items
+
+
+def build_from_openai(messages, budget: int = DEFAULT_BUDGET) -> str:
+    """OpenAI 风格 messages → 单条 prompt。"""
+    return build(extract_openai(messages), budget)
+
+
+def build_from_claude(system, messages, budget: int = DEFAULT_BUDGET) -> str:
+    """Claude 风格 system + messages → 单条 prompt。"""
+    return build(extract_claude(system, messages), budget)
