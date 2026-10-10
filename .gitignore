@@ -1,0 +1,13 @@
+# 运行时生成的敏感数据
+config.json
+data/
+*.log
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+
+# 启动器状态文件
+.server.pid
+.server.port

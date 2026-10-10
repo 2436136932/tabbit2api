@@ -1,0 +1,369 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tabbit2API 管理面板</title>
+<style>
+:root{--bg:#0f1420;--card:#171e2e;--card2:#1d2740;--line:#2a3654;--tx:#e8edf7;--tx2:#93a1bd;--acc:#4f8cff;--ok:#3ecf8e;--warn:#f5a524;--bad:#f4536b}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--tx);font:14px/1.6 "Segoe UI","Microsoft YaHei",sans-serif;min-height:100vh}
+a{color:var(--acc);text-decoration:none}
+.wrap{max-width:1120px;margin:0 auto;padding:24px 18px 60px}
+h1{font-size:21px;font-weight:600;display:flex;align-items:center;gap:10px}
+h1 .dot{width:9px;height:9px;border-radius:50%;background:var(--ok);box-shadow:0 0 8px var(--ok)}
+.sub{color:var(--tx2);font-size:12.5px;margin-top:3px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:18px;margin-top:16px}
+.card h2{font-size:15px;font-weight:600;margin-bottom:12px;display:flex;align-items:center;gap:8px}
+.row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+.grid{display:grid;gap:12px}
+.g2{grid-template-columns:repeat(auto-fit,minmax(300px,1fr))}
+input,select,button{background:var(--card2);border:1px solid var(--line);color:var(--tx);border-radius:8px;padding:8px 11px;font:inherit;font-size:13px;outline:none}
+input:focus,select:focus{border-color:var(--acc)}
+button{cursor:pointer;transition:.15s;white-space:nowrap}
+button:hover{border-color:var(--acc);background:#243155}
+button.pri{background:var(--acc);border-color:var(--acc);color:#fff}
+button.pri:hover{background:#3d7bf0}
+button.gh{background:transparent}
+button.mini{padding:4px 9px;font-size:12px;border-radius:6px}
+button:disabled{opacity:.45;cursor:not-allowed}
+.muted{color:var(--tx2);font-size:12.5px}
+.tabs{display:flex;gap:8px;margin-top:20px;border-bottom:1px solid var(--line)}
+.tab{padding:9px 16px;cursor:pointer;color:var(--tx2);border-bottom:2px solid transparent;font-size:13.5px}
+.tab.on{color:var(--tx);border-color:var(--acc)}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{text-align:left;color:var(--tx2);font-weight:500;padding:8px 10px;border-bottom:1px solid var(--line);white-space:nowrap}
+td{padding:9px 10px;border-bottom:1px solid #212b45;vertical-align:middle}
+tr:last-child td{border-bottom:none}
+.pill{display:inline-block;padding:2px 9px;border-radius:20px;font-size:11.5px;white-space:nowrap}
+.p-ok{background:rgba(62,207,142,.14);color:var(--ok)}
+.p-warn{background:rgba(245,165,36,.14);color:var(--warn)}
+.p-bad{background:rgba(244,83,107,.14);color:var(--bad)}
+.p-mut{background:rgba(147,161,189,.14);color:var(--tx2)}
+.p-acc{background:rgba(79,140,255,.14);color:var(--acc)}
+.bar{height:6px;background:#243055;border-radius:4px;overflow:hidden;min-width:70px}
+.bar i{display:block;height:100%;background:var(--acc)}
+.acc-head{display:flex;justify-content:space-between;align-items:flex-start;gap:10px}
+.acc-name{font-weight:600;font-size:13.5px}
+.mono{font-family:Consolas,monospace;font-size:12.5px}
+.toast{position:fixed;left:50%;bottom:26px;transform:translateX(-50%);background:#243155;border:1px solid var(--acc);padding:10px 18px;border-radius:10px;font-size:13px;opacity:0;transition:.25s;pointer-events:none;z-index:9}
+.toast.show{opacity:1}
+.login-box{max-width:360px;margin:14vh auto 0}
+.kv{display:flex;justify-content:space-between;gap:14px;padding:5px 0;border-bottom:1px dashed #253049}
+.kv:last-child{border:none}
+.kv span:first-child{color:var(--tx2)}
+.model-chip{display:inline-block;background:var(--card2);border:1px solid var(--line);border-radius:6px;padding:2px 8px;margin:3px 4px 0 0;font-size:12px}
+.hint{background:rgba(79,140,255,.08);border:1px solid rgba(79,140,255,.3);border-radius:8px;padding:10px 13px;font-size:12.5px;color:var(--tx2);margin-bottom:12px}
+.spin{width:13px;height:13px;border:2px solid var(--tx2);border-top-color:var(--acc);border-radius:50%;animation:sp .8s linear infinite;display:inline-block;vertical-align:-2px}
+@keyframes sp{to{transform:rotate(360deg)}}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<div class="toast" id="toast"></div>
+<script>
+const API="/admin/api";
+let REGION=null, TAB="accounts", POLL=null, LOGIN_TIMER=null, regionsGlobal=[];
+
+const h=(html)=>{const d=document.createElement("div");d.innerHTML=html.trim();return d.firstChild;};
+const esc=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const toast=m=>{const t=document.getElementById("toast");t.textContent=m;t.classList.add("show");clearTimeout(t._t);t._t=setTimeout(()=>t.classList.remove("show"),2600);};
+
+async function api(path,opts={}){
+  opts.headers=Object.assign({"Content-Type":"application/json"},opts.headers||{});
+  if(opts.body&&typeof opts.body!=="string")opts.body=JSON.stringify(opts.body);
+  const r=await fetch(API+path,opts);
+  const j=await r.json().catch(()=>({}));
+  if(!r.ok)throw new Error(j.detail||("HTTP "+r.status));
+  return j;
+}
+const pill=(txt,cls)=>`<span class="pill p-${cls}">${esc(txt)}</span>`;
+const statusPill=a=>{
+  if(!a.enabled)return pill("已禁用","mut");
+  if(a.status==="expired")return pill("登录失效","bad");
+  if(a.status==="active")return pill("正常","ok");
+  if(a.status==="cooldown")return pill("冷却中","warn");
+  if(a.status==="error")return pill("异常","bad");
+  return pill("未知","mut");
+};
+const lvPill=l=>!l?pill("未知","mut"):l==="premium"?pill("Premium","acc"):l==="standard"?pill("Standard","ok"):pill(l,"mut");
+const pct=v=>{const n=parseFloat(String(v).replace("%",""))||0;
+  return `<div class="bar"><i style="width:${Math.min(100,n)}%;background:${n>85?"var(--bad)":n>60?"var(--warn)":"var(--acc)"}"></i></div>`;};
+
+/* ─────────── 主框架 ─────────── */
+async function render(){
+  let regions;
+  try{regions=(await api("/regions")).regions;}
+  catch(e){document.getElementById("root").innerHTML=
+    `<div class="wrap"><div class="card"><h2>无法连接服务</h2>
+     <div class="muted">${esc(e.message)}</div>
+     <div class="muted" style="margin-top:8px">请确认服务正在运行（双击 启动.bat）。</div></div></div>`;
+    return;}
+  regionsGlobal=regions;
+  // 首次进入优先落在已有账号的板块，避免看到空白页误以为账号丢了
+  if(!REGION || !regions.find(r=>r.key===REGION)){
+    const withAcc=regions.find(r=>r.accounts>0);
+    REGION=(withAcc||regions[0]).key;
+  }
+  const root=document.getElementById("root");
+  root.innerHTML="";
+  root.appendChild(h(`<div class="wrap">
+    <div class="acc-head">
+      <div><h1><span class="dot"></span>Tabbit2API</h1>
+      <div class="sub">Tabbit 浏览器 → OpenAI / Claude 兼容接口 · 多账号池</div></div>
+      <div class="row"></div>
+    </div>
+    <div class="tabs" id="tabs">
+      <div class="tab" data-t="accounts">账号管理</div>
+      <div class="tab" data-t="models">模型与额度</div>
+      <div class="tab" data-t="usage">接入方式</div>
+      <div class="tab" data-t="settings">设置</div>
+    </div>
+    <div id="tabbar"></div>
+    <div id="content"></div>
+  </div>`));
+  document.querySelectorAll(".tab").forEach(t=>t.onclick=()=>{TAB=t.dataset.t;render();});
+  document.querySelectorAll(".tab").forEach(t=>t.classList.toggle("on",t.dataset.t===TAB));
+  clearInterval(POLL);clearInterval(LOGIN_TIMER);
+  const draw={accounts:tabAccounts,models:tabModels,usage:tabUsage,settings:tabSettings}[TAB]||tabAccounts;
+  await draw(regions);
+}
+
+/* ─────────── 账号管理 ─────────── */
+async function tabAccounts(regions){
+  const c=document.getElementById("content");
+  const cur=regions.find(r=>r.key===REGION);
+  c.innerHTML="";
+  c.appendChild(h(`<div class="card">
+    <div class="acc-head">
+      <h2>当前板块</h2>
+      <div class="row" id="regSwitch">
+        ${regions.map(r=>`<button class="mini ${r.key===REGION?"pri":"gh"}" data-r="${r.key}">${esc(r.label)}</button>`).join("")}
+      </div>
+    </div>
+    <div class="muted" style="margin-top:6px">导入的账号会归入上方选中的板块；不同板块的账号、模型、额度相互独立。</div>
+  </div>`));
+  c.appendChild(h(`<div class="card">
+    <h2><span class="pill p-acc">${esc(cur.label)}</span> 浏览器登录导入账号</h2>
+    <div class="hint">选择本机的一个浏览器打开登录页，完成 Tabbit 登录后自动捕获登录态。
+    <b>推荐「纯净模式」</b>：用真实浏览器登录，Google / Apple 等第三方登录不会被判定为「浏览器不安全」。</div>
+    <div class="grid g2" style="margin-bottom:10px">
+      <div><label class="muted">浏览器</label>
+        <select id="browserSel" style="width:100%"></select>
+        <div class="muted" id="browserHint" style="font-size:11.5px;margin-top:4px"></div></div>
+      <div><label class="muted">启动模式</label>
+        <select id="modeSel" style="width:100%">
+          <option value="clean">纯净模式（推荐 · 第三方登录不被拦截）</option>
+          <option value="stealth">加固模式（Playwright 驱动 · 去自动化指纹）</option>
+        </select>
+        <div class="muted" style="font-size:11.5px;margin-top:4px">纯净模式需要 Chromium 内核浏览器（Chrome / Edge / Tabbit 等）</div></div>
+    </div>
+    <div class="row">
+      <label class="muted">登录域名</label>
+      <select id="lurl">${[cur.base_url,...(cur.alt_urls||[])].map(u=>`<option value="${esc(u)}">${esc(u)}</option>`).join("")}</select>
+      <button class="pri" id="startLogin">开始浏览器登录</button>
+      <button class="gh" id="cancelLogin">取消</button>
+      <button class="gh" id="reloadBrowsers">重新检测浏览器</button>
+    </div>
+    <div id="loginState" style="margin-top:12px"></div>
+  </div>`));
+  c.appendChild(h(`<div class="card"><h2>「${esc(cur.label)}」账号列表 · <span class="muted" id="acCount"></span></h2>
+    <div style="overflow-x:auto"><table id="accTable"></table></div>
+    <div class="muted" style="margin-top:10px" id="accEmpty"></div></div>`));
+  c.appendChild(h(`<div class="card"><h2>全部账号一览</h2>
+    <div id="allAcc" class="muted"></div></div>`));
+  c.appendChild(h(`<div class="card"><h2>活跃会话缓存</h2>
+    <div style="overflow-x:auto"><table id="sessTable"></table></div>
+    <div class="row" style="margin-top:10px"><button class="mini gh" id="clearSess">清空会话缓存</button></div></div>`));
+
+  document.querySelectorAll("#regSwitch button").forEach(b=>b.onclick=()=>{REGION=b.dataset.r;render();});
+  const loadBrowsers=async()=>{
+    const sel=document.getElementById("browserSel"), hint=document.getElementById("browserHint");
+    sel.innerHTML='<option value="">检测中…</option>';
+    try{
+      const bs=(await api("/browsers")).browsers;
+      if(!bs.length){sel.innerHTML='<option value="">未检测到浏览器</option>';hint.textContent="请先安装 Chrome / Edge 等浏览器";return;}
+      sel.innerHTML=bs.map(b=>`<option value="${esc(b.id)}">${esc(b.label)}${b.version?" "+esc(b.version):""}${b.is_default?" · 系统默认":""}${b.chromium?"":" (不支持CDP)"}</option>`).join("");
+      hint.textContent=bs.map(b=>`${b.label}${b.recommended?"✓":""}`).join("  ");
+    }catch(e){sel.innerHTML='<option value="">检测失败</option>';hint.textContent=e.message;}
+  };
+  loadBrowsers();
+  document.getElementById("reloadBrowsers").onclick=loadBrowsers;
+  document.getElementById("startLogin").onclick=async()=>{
+    const bsel=document.getElementById("browserSel").value;
+    const mode=document.getElementById("modeSel").value;
+    if(!bsel)return toast("请先选择一个浏览器");
+    try{
+      const j=await api("/login/browser",{method:"POST",body:{
+        region:REGION, base_url:document.getElementById("lurl").value,
+        browser_id:bsel, mode}});
+      toast(`正在用 ${j.browser} 打开登录页（${mode==="clean"?"纯净":"加固"}模式）`);
+      pollLogin();}catch(e){toast(e.message);}
+  };
+  document.getElementById("cancelLogin").onclick=async()=>{try{await api("/login/cancel",{method:"POST"});toast("已取消");}catch(e){}};
+  document.getElementById("clearSess").onclick=async()=>{await api("/sessions",{method:"DELETE"});render();toast("已清空");};
+
+  await Promise.all([loadAccounts(),loadSessions()]);
+  pollLogin();
+  POLL=setInterval(()=>{if(TAB==="accounts"){loadAccounts();loadSessions();}},4000);
+}
+async function loadAccounts(){
+  let all=[];try{all=(await api("/accounts")).accounts;}catch(e){return;}
+  const list=all.filter(a=>a.region===REGION);
+  document.getElementById("acCount").textContent=`本板块 ${list.length} 个`;
+  const t=document.getElementById("accTable");
+  t.innerHTML=`<tr><th>账号</th><th>会员</th><th>额度已用</th><th>模型数</th><th>状态</th><th>调用</th><th style="width:230px">操作</th></tr>`
+   +(list.map(a=>`<tr>
+      <td><div class="acc-name">${esc(a.display_name||a.name)}</div>
+          <div class="muted">${esc(a.account_mask||"—")} · ${esc(a.base_url)}</div></td>
+      <td>${lvPill(a.member_level)}${a.plan_name?`<div class="muted" style="font-size:11px">${esc(a.plan_name)}</div>`:""}</td>
+      <td style="min-width:110px"><div class="muted">${esc(a.usage_percentage||"—")}</div>${pct(a.usage_percentage)}</td>
+      <td>${a.models_count}</td><td>${statusPill(a)}${a.last_error?`<div class="muted" style="font-size:11px" title="${esc(a.last_error)}">${esc(a.last_error.slice(0,26))}…</div>`:""}</td>
+      <td>${a.total_requests}</td>
+      <td><div class="row" style="gap:5px">
+        <button class="mini" data-act="test" data-id="${a.id}">测活</button>
+        <button class="mini" data-act="refresh" data-id="${a.id}">刷新</button>
+        <button class="mini gh" data-act="toggle" data-id="${a.id}" data-v="${a.enabled?0:1}">${a.enabled?"禁用":"启用"}</button>
+        <button class="mini gh" data-act="move" data-id="${a.id}">换板块</button>
+        <button class="mini gh" data-act="del" data-id="${a.id}">删除</button>
+      </div></td></tr>`).join("")||"");
+  document.getElementById("accEmpty").textContent=list.length?"":"该板块还没有账号，点上方「开始浏览器登录」导入。";
+  document.getElementById("allAcc").innerHTML=all.length
+    ? all.map(a=>`<div class="kv"><span>${esc(a.region_label||a.region)} · ${esc(a.display_name||a.name)}</span>
+        <span>${lvPill(a.member_level)} ${a.models_count} 模型 ${esc(a.usage_percentage||"")}</span></div>`).join("")
+    : "还没有任何账号。";
+  t.querySelectorAll("button[data-act]").forEach(b=>b.onclick=async()=>{
+    const id=b.dataset.id,act=b.dataset.act;b.disabled=true;
+    try{
+      if(act==="del"){if(!confirm("确认删除该账号？"))return b.disabled=false;await api("/accounts/"+id,{method:"DELETE"});}
+      else if(act==="toggle"){await api("/accounts/"+id,{method:"PATCH",body:{enabled:b.dataset.v==="1"}});}
+      else if(act==="move"){
+        const target=REGION==="cn"?"intl":"cn";
+        const label=(regionsGlobal.find(r=>r.key===target)||{}).label||target;
+        if(!confirm(`把该账号移到「${label}」板块？`))return b.disabled=false;
+        const j=await api("/accounts/"+id,{method:"PATCH",body:{region:target}});
+        toast(`已移到「${label}」`);REGION=target;setTimeout(()=>render(),600);return;
+      }
+      else if(act==="test"){const j=await api("/accounts/"+id+"/test",{method:"POST"});toast(j.ok?"测活成功 ✅":"测活失败："+(j.error||""));}
+      else if(act==="refresh"){const j=await api("/accounts/"+id+"/refresh",{method:"POST"});toast("已刷新：会员 "+(j.account.member_level||"未知"));}
+      await loadAccounts();
+    }catch(e){toast(e.message);b.disabled=false;}
+  });
+}
+async function loadSessions(){
+  let s=[];try{s=(await api("/sessions")).sessions;}catch(e){return;}
+  const t=document.getElementById("sessTable");
+  t.innerHTML=`<tr><th>API Key</th><th>模型</th><th>板块</th><th>会话 ID</th><th>请求数</th><th>剩余</th></tr>`
+   +(s.slice(0,25).map(x=>{const[k,m,r]=x.key.split(":");
+     return `<tr><td class="mono">${esc((k||"").slice(0,12))}${(k||"").length>12?"…":""}</td><td>${esc(m)}</td><td>${pill(r==="cn"?"国内":"国际","mut")}</td><td class="mono">${esc(x.session_id.slice(0,18))}…</td><td>${x.count}</td><td>${Math.floor(x.ttl_remaining/3600)}h</td></tr>`;}).join("")||"");
+}
+function pollLogin(){
+  clearInterval(LOGIN_TIMER);
+  const tick=async()=>{
+    let s;try{s=await api("/login/status");}catch(e){return;}
+    const box=document.getElementById("loginState");if(!box)return;
+    if(!s.active&&!s.id){box.innerHTML="";return;}
+    const cls=s.status==="success"?"ok":s.status==="failed"?"bad":"warn";
+    box.innerHTML=`<div class="row" style="gap:8px">
+      ${s.active?'<span class="spin"></span>':""}${pill(s.status,cls)}
+      <span class="muted">${esc(s.message||"")}</span>
+      ${s.browser?pill(s.browser,"mut"):""}</div>`;
+    if(s.status==="success"){toast("导入成功："+(s.display_name||"账号"));setTimeout(()=>render(),1400);}
+  };
+  tick();LOGIN_TIMER=setInterval(tick,1500);
+}
+
+/* ─────────── 模型与额度 ─────────── */
+async function tabModels(regions){
+  const c=document.getElementById("content");c.innerHTML="";
+  c.appendChild(h(`<div class="card">
+    <div class="acc-head"><h2>模型目录（来自上游真实数据）</h2>
+    <div class="row"><select id="mreg">${regions.map(r=>`<option value="${r.key}" ${r.key===REGION?"selected":""}>${esc(r.label)}</option>`).join("")}</select>
+    <button class="mini pri" id="rm">刷新模型</button></div></div>
+    <div class="muted" style="margin:8px 0 12px" id="mupd"></div>
+    <div id="mlist"></div></div>`));
+  const load=async()=>{
+    const rg=document.getElementById("mreg").value;
+    let accs=[];try{accs=(await api("/accounts")).accounts.filter(a=>a.region===rg);}catch(e){}
+    const box=document.getElementById("mlist");
+    if(!accs.length){box.innerHTML='<div class="muted">该板块暂无账号，导入后即可看到真实模型与额度。</div>';return;}
+    box.innerHTML=accs.map(a=>`<div style="margin-bottom:16px">
+      <div class="row" style="gap:8px;margin-bottom:6px">${lvPill(a.member_level)}<b>${esc(a.display_name||a.name)}</b>
+        <span class="muted">已用 ${esc(a.usage_percentage||"—")}</span>${a.status==="expired"?pill("登录失效","bad"):""}</div>
+      <div>${(a.models||[]).map(m=>{
+        const t=m.model_access_type, cls=t==="free_unlimited"?"ok":t==="premium_only"?"bad":"mut";
+        const tag=t==="free_unlimited"?"不限量":t==="premium_only"?"Premium":"×"+m.display_multiplier;
+        return `<span class="model-chip" title="${esc(m.description||"")}">${esc(m.display_name)}
+          <span class="pill p-${cls}" style="margin-left:4px;padding:0 6px">${tag}</span></span>`;}).join("")||'<span class="muted">点「刷新模型」拉取</span>'}</div></div>`).join("");
+    // 走面板专用接口（不需要代理 API Key，避免 401 导致面板崩溃）
+    let n=0, upd=null;
+    try{const cat=await api(`/regions/${rg}/models`);n=cat.count;upd=cat.updated_at;}catch(e){}
+    document.getElementById("mupd").textContent=n
+      ? `该板块可用模型 ${n} 个${upd?" · 更新于 "+new Date(upd*1000).toLocaleString():""}`
+      : "尚未拉取模型目录，点右上「刷新模型」。";
+  };
+  document.getElementById("rm").onclick=async()=>{
+    const rg=document.getElementById("mreg").value;b=document.getElementById("rm");b.disabled=true;
+    try{const j=await api(`/regions/${rg}/refresh-models`,{method:"POST"});toast(`已拉取 ${j.count} 个模型`);await load();}
+    catch(e){toast(e.message);b.disabled=false;}
+  };
+  document.getElementById("mreg").onchange=()=>{REGION=document.getElementById("mreg").value;load();};
+  await load();
+}
+
+/* ─────────── 接入方式 ─────────── */
+async function tabUsage(regions){
+  const s=await api("/settings").catch(()=>({}));
+  const c=document.getElementById("content");c.innerHTML="";
+  const key=s.api_key||"<你的APIKey>";
+  c.appendChild(h(`<div class="card"><h2>OpenAI 兼容</h2>
+    <pre class="mono" style="background:var(--card2);padding:12px;border-radius:8px;overflow-x:auto">BASE_URL = http://127.0.0.1:${s.port}/v1
+API_KEY  = ${esc(key)}
+
+curl http://127.0.0.1:${s.port}/v1/chat/completions \\
+  -H "Authorization: Bearer ${esc(key)}" \\
+  -H "Content-Type: application/json" \\
+  -d '{"model":"默认","stream":true,
+       "messages":[{"role":"user","content":"你好"}]}'</pre>
+    <p class="muted" style="margin-top:8px">板块选择：请求头 <code class="mono">X-Tabbit-Region: intl</code>（国际版，默认）或 <code class="mono">cn</code>（国内版）。</p></div>`));
+  c.appendChild(h(`<div class="card"><h2>Claude 兼容</h2>
+    <pre class="mono" style="background:var(--card2);padding:12px;border-radius:8px;overflow-x:auto">export ANTHROPIC_BASE_URL=http://127.0.0.1:${s.port}
+export ANTHROPIC_API_KEY=${esc(key)}
+export ANTHROPIC_MODEL=默认
+claude</pre></div>`));
+  c.appendChild(h(`<div class="card"><h2>其他客户端</h2>
+    <table><tr><th>客户端</th><th>配置</th></tr>
+    <tr><td>Cherry Studio / ChatBox</td><td class="mono">OpenAI Provider · http://127.0.0.1:${s.port}/v1</td></tr>
+    <tr><td>Cline / Roo Code</td><td class="mono">OpenAI Compatible · http://127.0.0.1:${s.port}/v1</td></tr>
+    <tr><td>降级说明</td><td class="muted">Premium 模型仅 Premium 会员可用，其他会员会返回上游 492 错误</td></tr></table></div>`));
+}
+
+/* ─────────── 设置 ─────────── */
+async function tabSettings(){
+  const s=await api("/settings");
+  const c=document.getElementById("content");c.innerHTML="";
+  c.appendChild(h(`<div class="card"><h2>对外服务</h2>
+    <div class="grid g2">
+      <div><label class="muted">API Key（留空则不鉴权）</label><input id="skey" class="mono" style="width:100%" value="${esc(s.api_key||"")}" placeholder="sk-..."></div>
+      <div><label class="muted">默认模型</label><input id="smodel" style="width:100%" value="${esc(s.default_model||"默认")}"></div>
+      <div><label class="muted">会话缓存 TTL（秒，0 关闭）</label><input id="sttl" type="number" style="width:100%" value="${s.session_ttl}"></div>
+      <div><label class="muted">监听端口（重启生效）</label><input value="${s.port}" disabled style="width:100%"></div>
+      <div><label class="muted">连续错误熔断阈值</label><input id="serr" type="number" style="width:100%" value="${s.max_consecutive_errors}"></div>
+      <div><label class="muted">冷却时长（秒）</label><input id="scd" type="number" style="width:100%" value="${s.cooldown_seconds}"></div>
+    </div>
+    <div class="muted" style="margin-top:10px">面板不设密码，打开即可使用；对外接口的鉴权由上面的 API Key 控制。</div>
+    <div class="row" style="margin-top:14px"><button class="pri" id="saveS">保存设置</button>
+    <button class="gh" id="genKey">生成随机 API Key</button></div></div>`));
+  document.getElementById("genKey").onclick=()=>{document.getElementById("skey").value="sk-"+crypto.randomUUID().replace(/-/g,"");};
+  document.getElementById("saveS").onclick=async()=>{
+    const v=id=>document.getElementById(id).value;
+    try{await api("/settings",{method:"PUT",body:{
+      api_key:v("skey"),default_model:v("smodel"),session_ttl:+v("sttl"),
+      max_consecutive_errors:+v("serr"),cooldown_seconds:+v("scd")}});toast("已保存");}
+    catch(e){toast(e.message);}
+  };
+}
+render();
+</script>
+</body>
+</html>
